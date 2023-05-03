@@ -29,6 +29,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/conditions"
@@ -39,12 +42,37 @@ import (
 // deleteOrphanedHelmReleaseProxies deletes any HelmReleaseProxy resources that belong to a Cluster that is not selected by its parent HelmChartProxy.
 func (r *HelmChartProxyReconciler) deleteOrphanedHelmReleaseProxies(ctx context.Context, helmChartProxy *addonsv1alpha1.HelmChartProxy, clusters []clusterv1.Cluster, helmReleaseProxies []addonsv1alpha1.HelmReleaseProxy) error {
 	log := ctrl.LoggerFrom(ctx)
+	helmChartProxyList := &addonsv1alpha1.HelmChartProxyList{}
+	if err := r.Client.List(ctx, helmChartProxyList, client.InNamespace(helmChartProxy.Namespace)); err != nil {
+		return fmt.Errorf("failed to list HelmChartProxy objects: %w", err)
+	}
 
-	releasesToDelete := getOrphanedHelmReleaseProxies(ctx, clusters, helmReleaseProxies)
+	hcpForChartList := make([]addonsv1alpha1.HelmChartProxy, 0, len(helmChartProxyList.Items))
+	for i, hcp := range helmChartProxyList.Items {
+		// list all helmChartProxies that reference the same chart, except for the object that we reconcile already
+		if hcp.Name != helmChartProxy.Name && hcp.Spec.ChartName == helmChartProxy.Spec.ChartName {
+			hcpForChartList = append(hcpForChartList, helmChartProxyList.Items[i])
+		}
+	}
+
+	releasesToDelete, releasesToOrphan, err := r.getOrphanedHelmReleaseProxies(ctx, clusters, helmReleaseProxies, hcpForChartList)
+	if err != nil {
+		return fmt.Errorf("failed to get orphaned HelmReleaseProxies: %w", err)
+	}
+
 	log.V(2).Info("Deleting orphaned releases")
 	for _, release := range releasesToDelete {
 		log.V(2).Info("Deleting release", "release", release)
 		if err := r.deleteHelmReleaseProxy(ctx, &release); err != nil {
+			conditions.MarkFalse(helmChartProxy, addonsv1alpha1.HelmReleaseProxySpecsUpToDateCondition, addonsv1alpha1.HelmReleaseProxyDeletionFailedReason, clusterv1.ConditionSeverityError, err.Error())
+			return err
+		}
+	}
+
+	log.V(2).Info("Removing labels of orphaned releases")
+	for _, release := range releasesToOrphan {
+		log.V(2).Info("Removing labels of orphaned release", "release", release)
+		if err := r.removeOwnerOfHelmReleaseProxy(ctx, helmChartProxy, &release); err != nil {
 			conditions.MarkFalse(helmChartProxy, addonsv1alpha1.HelmReleaseProxySpecsUpToDateCondition, addonsv1alpha1.HelmReleaseProxyDeletionFailedReason, clusterv1.ConditionSeverityError, err.Error())
 			return err
 		}
@@ -77,6 +105,12 @@ func (r *HelmChartProxyReconciler) reconcileForCluster(ctx context.Context, helm
 		conditions.MarkFalse(helmChartProxy, addonsv1alpha1.HelmReleaseProxySpecsUpToDateCondition, addonsv1alpha1.HelmReleaseProxyReinstallingReason, clusterv1.ConditionSeverityInfo, "HelmReleaseProxy on cluster '%s' successfully deleted, preparing to reinstall", cluster.Name)
 		return nil // Try returning early so it will requeue
 		// TODO: should we continue in the loop or just requeue?
+	}
+
+	existingHelmReleaseProxy, err = r.getOrphanedHelmReleaseProxy(ctx, helmChartProxy, &cluster)
+	if err != nil {
+		// TODO: Should we set a condition here?
+		return errors.Wrapf(err, "failed to get orphaned HelmReleaseProxy for cluster %s", cluster.Name)
 	}
 
 	values, err := internal.ParseValues(ctx, r.Client, helmChartProxy.Spec, &cluster)
@@ -128,6 +162,56 @@ func (r *HelmChartProxyReconciler) getExistingHelmReleaseProxy(ctx context.Conte
 	return &helmReleaseProxyList.Items[0], nil
 }
 
+// getOrphanedHelmReleaseProxy returns an orphaned HelmReleaseProxy for the given cluster and helm chart if it exists.
+func (r *HelmChartProxyReconciler) getOrphanedHelmReleaseProxy(ctx context.Context, helmChartProxy *addonsv1alpha1.HelmChartProxy, cluster *clusterv1.Cluster) (*addonsv1alpha1.HelmReleaseProxy, error) {
+	log := ctrl.LoggerFrom(ctx)
+
+	helmReleaseProxyList := &addonsv1alpha1.HelmReleaseProxyList{}
+
+	listOpts := []client.ListOption{
+		client.MatchingLabels{
+			clusterv1.ClusterNameLabel: cluster.Name,
+		},
+	}
+
+	// TODO: Figure out if we want this search to be cross-namespaces.
+
+	log.V(2).Info("Attempting to fetch existing HelmReleaseProxy with Cluster and HelmChartProxy labels", "cluster", cluster.Name, "helmChartProxy", helmChartProxy.Name)
+	if err := r.Client.List(ctx, helmReleaseProxyList, listOpts...); err != nil {
+		return nil, err
+	}
+
+	if helmReleaseProxyList.Items == nil || len(helmReleaseProxyList.Items) == 0 {
+		log.V(2).Info("No HelmReleaseProxy found matching the cluster and HelmChartProxy", "cluster", cluster.Name, "helmChartProxy", helmChartProxy.Name)
+		return nil, nil
+	}
+
+	orphanedHelmReleaseProxiesWithSameChart := make([]*addonsv1alpha1.HelmReleaseProxy, 0, len(helmReleaseProxyList.Items))
+
+	for i, helmReleaseProxy := range helmReleaseProxyList.Items {
+		if helmReleaseProxy.Spec.ChartName == helmChartProxy.Spec.ChartName {
+			// only take helmReleaseProxies which are orphaned, i.e. have no helmChartProxyLabel
+			if _, ok := helmReleaseProxy.Labels[addonsv1alpha1.HelmChartProxyLabelName]; !ok {
+				orphanedHelmReleaseProxiesWithSameChart = append(orphanedHelmReleaseProxiesWithSameChart, &helmReleaseProxyList.Items[i])
+			}
+		}
+	}
+
+	if len(orphanedHelmReleaseProxiesWithSameChart) == 0 {
+		log.V(2).Info("No orphaned HelmReleaseProxy found matching the cluster and HelmChartProxy", "cluster", cluster.Name, "helmChartProxy", helmChartProxy.Name)
+		return nil, nil
+	}
+
+	if len(orphanedHelmReleaseProxiesWithSameChart) > 1 {
+		log.V(2).Info("Multiple orphaned HelmReleaseProxies found matching the cluster and HelmChartProxy", "cluster", cluster.Name, "helmChartProxy", helmChartProxy.Name)
+		return nil, errors.Errorf("multiple orphaned HelmReleaseProxies found matching the cluster and HelmChartProxy")
+	}
+
+	log.V(2).Info("Found existing matching orphaned HelmReleaseProxy", "cluster", cluster.Name, "helmChartProxy", helmChartProxy.Name)
+
+	return orphanedHelmReleaseProxiesWithSameChart[0], nil
+}
+
 // createOrUpdateHelmReleaseProxy creates or updates the HelmReleaseProxy for the given cluster.
 func (r *HelmChartProxyReconciler) createOrUpdateHelmReleaseProxy(ctx context.Context, existing *addonsv1alpha1.HelmReleaseProxy, helmChartProxy *addonsv1alpha1.HelmChartProxy, cluster *clusterv1.Cluster, parsedValues string) error {
 	log := ctrl.LoggerFrom(ctx)
@@ -165,6 +249,30 @@ func (r *HelmChartProxyReconciler) deleteHelmReleaseProxy(ctx context.Context, h
 	return nil
 }
 
+// removeOwnerOfHelmReleaseProxy removes owner of the HelmReleaseProxy for the given cluster.
+func (r *HelmChartProxyReconciler) removeOwnerOfHelmReleaseProxy(ctx context.Context, helmChartProxy *addonsv1alpha1.HelmChartProxy, helmReleaseProxy *addonsv1alpha1.HelmReleaseProxy) error {
+	log := ctrl.LoggerFrom(ctx)
+
+	// remove label to helmChartProxy
+	delete(helmReleaseProxy.Labels, addonsv1alpha1.HelmChartProxyLabelName)
+
+	// remove owner references of helmChartProxy
+	name := helmChartProxy.Name
+	kind := helmChartProxy.Kind
+	apiVersion := helmChartProxy.APIVersion
+	helmReleaseProxy.OwnerReferences = removeOwnerRefFromList(helmReleaseProxy.OwnerReferences, name, kind, apiVersion)
+
+	if err := r.Client.Update(ctx, helmReleaseProxy); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.V(2).Info("HelmReleaseProxy deleted, cannot update", "helmReleaseProxy", helmReleaseProxy.Name)
+			return nil
+		}
+		return errors.Wrapf(err, "failed to remove owner of helmReleaseProxy: %s", helmReleaseProxy.Name)
+	}
+
+	return nil
+}
+
 // constructHelmReleaseProxy constructs a new HelmReleaseProxy for the given Cluster or updates the existing HelmReleaseProxy if needed.
 // If no update is needed, this returns nil. Note that this does not check if we need to reinstall the HelmReleaseProxy, i.e. immutable fields changed.
 func constructHelmReleaseProxy(existing *addonsv1alpha1.HelmReleaseProxy, helmChartProxy *addonsv1alpha1.HelmChartProxy, parsedValues string, cluster *clusterv1.Cluster) *addonsv1alpha1.HelmReleaseProxy {
@@ -195,6 +303,25 @@ func constructHelmReleaseProxy(existing *addonsv1alpha1.HelmReleaseProxy, helmCh
 	} else {
 		helmReleaseProxy = existing
 		changed := false
+
+		// Check if helmReleaseProxy is owned by helmChartProxy. If not, add the owner reference.
+		if !util.IsOwnedByObject(helmChartProxy, helmReleaseProxy) {
+			helmReleaseProxy.OwnerReferences = util.EnsureOwnerRef(helmReleaseProxy.OwnerReferences, *metav1.NewControllerRef(helmChartProxy, helmChartProxy.GroupVersionKind()))
+		}
+
+		// set labels in case the existing helmReleaseProxy has been orphaned
+		// labels should never be nil, but it is added just in case. There should always be the cluster name on the orphaned resource.
+		if helmReleaseProxy.Labels == nil {
+			helmReleaseProxy.Labels = map[string]string{}
+			helmReleaseProxy.Labels[clusterv1.ClusterNameLabel] = cluster.Name
+			changed = true
+		}
+
+		if _, ok := helmReleaseProxy.Labels[addonsv1alpha1.HelmChartProxyLabelName]; !ok {
+			helmReleaseProxy.Labels[addonsv1alpha1.HelmChartProxyLabelName] = helmChartProxy.Name
+			changed = true
+		}
+
 		if existing.Spec.Version != helmChartProxy.Spec.Version {
 			changed = true
 		}
@@ -241,7 +368,12 @@ func shouldReinstallHelmRelease(ctx context.Context, existing *addonsv1alpha1.He
 }
 
 // getOrphanedHelmReleaseProxies returns a list of HelmReleaseProxies that are not associated with any of the selected Clusters for a given HelmChartProxy.
-func getOrphanedHelmReleaseProxies(ctx context.Context, clusters []clusterv1.Cluster, helmReleaseProxies []addonsv1alpha1.HelmReleaseProxy) []addonsv1alpha1.HelmReleaseProxy {
+func (r *HelmChartProxyReconciler) getOrphanedHelmReleaseProxies(
+	ctx context.Context,
+	clusters []clusterv1.Cluster,
+	helmReleaseProxies []addonsv1alpha1.HelmReleaseProxy,
+	otherhelmChartProxiesWithSameChart []addonsv1alpha1.HelmChartProxy,
+) (releasesToDelete []addonsv1alpha1.HelmReleaseProxy, releasesToOrphan []addonsv1alpha1.HelmReleaseProxy, err error) {
 	log := ctrl.LoggerFrom(ctx)
 	log.V(2).Info("Getting HelmReleaseProxies to delete")
 
@@ -252,20 +384,108 @@ func getOrphanedHelmReleaseProxies(ctx context.Context, clusters []clusterv1.Clu
 	}
 	log.V(2).Info("Selected clusters", "clusters", selectedClusters)
 
-	releasesToDelete := []addonsv1alpha1.HelmReleaseProxy{}
 	for _, helmReleaseProxy := range helmReleaseProxies {
 		clusterRef := helmReleaseProxy.Spec.ClusterRef
 		key := clusterRef.Namespace + "/" + clusterRef.Name
 		if _, ok := selectedClusters[key]; !ok {
-			releasesToDelete = append(releasesToDelete, helmReleaseProxy)
+			// The cluster does not match the label selector of the helmChartProxy anymore.
+			// Instead of deleting the respective helmReleaseObject immediately, we check whether
+			// the cluster matches the label selector of another helmChartProxy which has the same chart.
+			// If that is the case, we don't want to delete the helmReleaseProxy, as this would remove the chart of the cluster
+			// and install it again afterwards. Instead, we want to only trigger a delete if the cluster should not have the
+			// respective Helmchart installed at all.
+
+			// get cluster object to check whether label matches the selector of another relevant helmChartProxy now
+			var cluster clusterv1.Cluster
+			namespacedName := types.NamespacedName{Namespace: clusterRef.Namespace, Name: clusterRef.Name}
+
+			if err := r.Client.Get(ctx, namespacedName, &cluster); err != nil && !apierrors.IsNotFound(err) {
+				// if cluster has been deleted, it shouldn't block this operation
+				return nil, nil, fmt.Errorf("failed to get cluster: %w", err)
+			}
+
+			var toOrphan bool
+			for _, helmChartProxy := range otherhelmChartProxiesWithSameChart {
+				labelselector, err := metav1.LabelSelectorAsSelector(&helmChartProxy.Spec.ClusterSelector)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to create label selector: %w", err)
+				}
+
+				if labelselector.Matches(labels.Set(cluster.Labels)) {
+					releasesToOrphan = append(releasesToOrphan, helmReleaseProxy)
+					toOrphan = true
+					break
+				}
+			}
+
+			if !toOrphan {
+				releasesToDelete = append(releasesToDelete, helmReleaseProxy)
+			}
 		}
 	}
 
-	names := make([]string, len(releasesToDelete))
-	for _, release := range releasesToDelete {
-		names = append(names, release.Name)
+	{
+		names := make([]string, len(releasesToDelete))
+		for _, release := range releasesToDelete {
+			names = append(names, release.Name)
+		}
+		log.V(2).Info("Releases to delete", "releases", names)
 	}
-	log.V(2).Info("Releases to delete", "releases", names)
+	{
+		names := make([]string, len(releasesToOrphan))
+		for _, release := range releasesToOrphan {
+			names = append(names, release.Name)
+		}
+		log.V(2).Info("Releases to orphan", "releases", names)
+	}
+	return releasesToDelete, releasesToOrphan, nil
+}
 
-	return releasesToDelete
+// removeOwnerRefFromList removes the owner reference of a Kubernetes object.
+func removeOwnerRefFromList(refList []metav1.OwnerReference, name, kind, apiVersion string) []metav1.OwnerReference {
+	if len(refList) == 0 {
+		return refList
+	}
+	index, found := findOwnerRefFromList(refList, name, kind, apiVersion)
+	// if owner ref is not found, return
+	if !found {
+		return refList
+	}
+
+	// if it is the only owner ref, we can return an empty slice
+	if len(refList) == 1 {
+		return []metav1.OwnerReference{}
+	}
+
+	// remove owner ref from slice
+	refListLen := len(refList) - 1
+	refList[index] = refList[refListLen]
+	refList = refList[:refListLen]
+
+	return removeOwnerRefFromList(refList, name, kind, apiVersion)
+}
+
+// findOwnerRefFromList finds the owner ref of a Kubernetes object in a list of owner refs.
+func findOwnerRefFromList(refList []metav1.OwnerReference, name, kind, apiVersion string) (ref int, found bool) {
+	bGV, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		panic("object has invalid group version")
+	}
+
+	for i, curOwnerRef := range refList {
+		aGV, err := schema.ParseGroupVersion(curOwnerRef.APIVersion)
+		if err != nil {
+			// ignore owner ref if it has invalid group version
+			continue
+		}
+
+		// not matching on UID since when pivoting it might change
+		// Not matching on API version as this might change
+		if curOwnerRef.Name == name &&
+			curOwnerRef.Kind == kind &&
+			aGV.Group == bGV.Group {
+			return i, true
+		}
+	}
+	return 0, false
 }
