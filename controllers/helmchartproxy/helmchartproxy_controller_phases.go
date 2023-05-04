@@ -50,7 +50,7 @@ func (r *HelmChartProxyReconciler) deleteOrphanedHelmReleaseProxies(ctx context.
 	hcpForChartList := make([]addonsv1alpha1.HelmChartProxy, 0, len(helmChartProxyList.Items))
 	for i, hcp := range helmChartProxyList.Items {
 		// list all helmChartProxies that reference the same chart, except for the object that we reconcile already
-		if hcp.Name != helmChartProxy.Name && hcp.Spec.ChartName == helmChartProxy.Spec.ChartName {
+		if hcp.Name != helmChartProxy.Name && hcp.Spec.ReleaseName == helmChartProxy.Spec.ReleaseName {
 			hcpForChartList = append(hcpForChartList, helmChartProxyList.Items[i])
 		}
 	}
@@ -189,7 +189,7 @@ func (r *HelmChartProxyReconciler) getOrphanedHelmReleaseProxy(ctx context.Conte
 	orphanedHelmReleaseProxiesWithSameChart := make([]*addonsv1alpha1.HelmReleaseProxy, 0, len(helmReleaseProxyList.Items))
 
 	for i, helmReleaseProxy := range helmReleaseProxyList.Items {
-		if helmReleaseProxy.Spec.ChartName == helmChartProxy.Spec.ChartName {
+		if helmReleaseProxy.Spec.ReleaseName == helmChartProxy.Spec.ReleaseName {
 			// only take helmReleaseProxies which are orphaned, i.e. have no helmChartProxyLabel
 			if _, ok := helmReleaseProxy.Labels[addonsv1alpha1.HelmChartProxyLabelName]; !ok {
 				orphanedHelmReleaseProxiesWithSameChart = append(orphanedHelmReleaseProxiesWithSameChart, &helmReleaseProxyList.Items[i])
