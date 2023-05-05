@@ -343,6 +343,7 @@ func constructHelmReleaseProxy(existing *addonsv1alpha1.HelmReleaseProxy, helmCh
 		}
 	}
 
+	helmReleaseProxy.Spec.ChartName = helmChartProxy.Spec.ChartName
 	helmReleaseProxy.Spec.Version = helmChartProxy.Spec.Version
 	helmReleaseProxy.Spec.Values = parsedValues
 
