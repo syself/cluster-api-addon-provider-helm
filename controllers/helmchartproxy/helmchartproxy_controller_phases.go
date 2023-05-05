@@ -193,6 +193,9 @@ func (r *HelmChartProxyReconciler) getOrphanedHelmReleaseProxy(ctx context.Conte
 			// only take helmReleaseProxies which are orphaned, i.e. have no helmChartProxyLabel
 			if _, ok := helmReleaseProxy.Labels[addonsv1alpha1.HelmChartProxyLabelName]; !ok {
 				orphanedHelmReleaseProxiesWithSameChart = append(orphanedHelmReleaseProxiesWithSameChart, &helmReleaseProxyList.Items[i])
+			} else {
+				// wait some time because we expect this other HelmReleaseProxy to be orphaned soon
+				return nil, errRequeue
 			}
 		}
 	}

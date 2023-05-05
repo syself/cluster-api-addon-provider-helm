@@ -19,6 +19,7 @@ package helmchartproxy
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/pkg/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -51,6 +52,8 @@ type HelmChartProxyReconciler struct {
 	// WatchFilterValue is the label value used to filter events prior to reconciliation.
 	WatchFilterValue string
 }
+
+var errRequeue = fmt.Errorf("requeue again")
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *HelmChartProxyReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, options controller.Options) error {
@@ -190,6 +193,9 @@ func (r *HelmChartProxyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	log.V(2).Info("Reconciling HelmChartProxy", "randomName", helmChartProxy.Name)
 	err = r.reconcileNormal(ctx, helmChartProxy, clusterList.Items, releaseList.Items)
 	if err != nil {
+		if errors.Is(err, errRequeue) {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 		return ctrl.Result{}, err
 	}
 	conditions.MarkTrue(helmChartProxy, addonsv1alpha1.HelmReleaseProxySpecsUpToDateCondition)
