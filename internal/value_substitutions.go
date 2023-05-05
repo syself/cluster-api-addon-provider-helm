@@ -19,6 +19,7 @@ package internal
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"text/template"
 
 	"github.com/Masterminds/sprig"
@@ -31,6 +32,8 @@ import (
 
 	addonsv1alpha1 "sigs.k8s.io/cluster-api-addon-provider-helm/api/v1alpha1"
 )
+
+var errInfrastructureNotReady = fmt.Errorf("infrastructure not ready")
 
 // initializeBuiltins takes a map of keys to object references, attempts to get the referenced objects, and returns a map of keys to the actual objects.
 // These objects are a map[string]interface{} so that they can be used as values in the template.
@@ -54,6 +57,9 @@ func initializeBuiltins(ctx context.Context, c ctrlClient.Client, referenceMap m
 // ParseValues parses the values template and returns the expanded template. It attempts to populate a map of supported templating objects.
 func ParseValues(ctx context.Context, c ctrlClient.Client, spec addonsv1alpha1.HelmChartProxySpec, cluster *clusterv1.Cluster) (string, error) {
 	log := ctrl.LoggerFrom(ctx)
+	if !cluster.Status.InfrastructureReady {
+		return "", errInfrastructureNotReady
+	}
 
 	log.V(2).Info("Rendering templating in values:", "values", spec.ValuesTemplate)
 	references := map[string]corev1.ObjectReference{
