@@ -177,7 +177,6 @@ func InstallHelmRelease(ctx context.Context, kubeconfig string, spec addonsv1alp
 		return nil, err
 	}
 	chartRequested, err := helmLoader.Load(cp)
-
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +276,10 @@ func shouldUpgradeHelmRelease(ctx context.Context, existing helmRelease.Release,
 	}
 	if existing.Chart.Metadata.Version != chartRequested.Metadata.Version {
 		log.V(3).Info("Versions are different, upgrading")
+		return true, nil
+	}
+	if existing.Chart.Name() != chartRequested.Name() {
+		log.V(3).Info("Names are different, upgrading")
 		return true, nil
 	}
 
