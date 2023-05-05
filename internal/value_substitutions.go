@@ -33,7 +33,7 @@ import (
 	addonsv1alpha1 "sigs.k8s.io/cluster-api-addon-provider-helm/api/v1alpha1"
 )
 
-var errInfrastructureNotReady = fmt.Errorf("infrastructure not ready")
+var ErrInfrastructureNotReady = fmt.Errorf("infrastructure not ready")
 
 // initializeBuiltins takes a map of keys to object references, attempts to get the referenced objects, and returns a map of keys to the actual objects.
 // These objects are a map[string]interface{} so that they can be used as values in the template.
@@ -58,7 +58,7 @@ func initializeBuiltins(ctx context.Context, c ctrlClient.Client, referenceMap m
 func ParseValues(ctx context.Context, c ctrlClient.Client, spec addonsv1alpha1.HelmChartProxySpec, cluster *clusterv1.Cluster) (string, error) {
 	log := ctrl.LoggerFrom(ctx)
 	if !cluster.Status.InfrastructureReady {
-		return "", errInfrastructureNotReady
+		return "", ErrInfrastructureNotReady
 	}
 
 	log.V(2).Info("Rendering templating in values:", "values", spec.ValuesTemplate)

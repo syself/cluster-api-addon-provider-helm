@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	addonsv1alpha1 "sigs.k8s.io/cluster-api-addon-provider-helm/api/v1alpha1"
+	"sigs.k8s.io/cluster-api-addon-provider-helm/internal"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util/conditions"
@@ -193,7 +194,7 @@ func (r *HelmChartProxyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	log.V(2).Info("Reconciling HelmChartProxy", "randomName", helmChartProxy.Name)
 	err = r.reconcileNormal(ctx, helmChartProxy, clusterList.Items, releaseList.Items)
 	if err != nil {
-		if errors.Is(err, errRequeue) {
+		if errors.Is(err, errRequeue) || errors.Is(err, internal.ErrInfrastructureNotReady) {
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		return ctrl.Result{}, err
