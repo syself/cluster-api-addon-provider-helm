@@ -331,6 +331,12 @@ func constructHelmReleaseProxy(existing *addonsv1alpha1.HelmReleaseProxy, helmCh
 		if !cmp.Equal(existing.Spec.Values, parsedValues) {
 			changed = true
 		}
+		if existing.Spec.Version != helmChartProxy.Spec.Version {
+			changed = true
+		}
+		if helmReleaseProxy.Spec.ChartName != helmChartProxy.Spec.ChartName {
+			changed = true
+		}
 
 		if !changed {
 			return nil
@@ -354,7 +360,8 @@ func shouldReinstallHelmRelease(ctx context.Context, existing *addonsv1alpha1.He
 
 	isReleaseNameGenerated := ok && result == "true"
 	switch {
-	case existing.Spec.ChartName != helmChartProxy.Spec.ChartName:
+	// if release name is the same and chart name changed, it's okay to not trigger a reinstall
+	case existing.Spec.ChartName != helmChartProxy.Spec.ChartName && existing.Spec.ReleaseName != helmChartProxy.Spec.ReleaseName:
 		log.V(2).Info("ChartName changed", "existing", existing.Spec.ChartName, "helmChartProxy", helmChartProxy.Spec.ChartName)
 	case existing.Spec.RepoURL != helmChartProxy.Spec.RepoURL:
 		log.V(2).Info("RepoURL changed", "existing", existing.Spec.RepoURL, "helmChartProxy", helmChartProxy.Spec.RepoURL)
