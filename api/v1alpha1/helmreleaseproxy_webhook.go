@@ -79,12 +79,12 @@ func (r *HelmReleaseProxy) ValidateUpdate(oldRaw runtime.Object) error {
 		)
 	}
 
-	if !reflect.DeepEqual(r.Spec.ChartName, old.Spec.ChartName) {
-		allErrs = append(allErrs,
-			field.Invalid(field.NewPath("spec", "ChartName"),
-				r.Spec.ChartName, "field is immutable"),
-		)
-	}
+	// if !reflect.DeepEqual(r.Spec.ChartName, old.Spec.ChartName) {
+	// 	allErrs = append(allErrs,
+	// 		field.Invalid(field.NewPath("spec", "ChartName"),
+	// 			r.Spec.ChartName, "field is immutable"),
+	// 	)
+	// }
 
 	if !reflect.DeepEqual(r.Spec.ReleaseNamespace, old.Spec.ReleaseNamespace) {
 		allErrs = append(allErrs,
