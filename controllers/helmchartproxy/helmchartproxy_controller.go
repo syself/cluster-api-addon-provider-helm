@@ -271,8 +271,12 @@ func (r *HelmChartProxyReconciler) listMatchingClusters(ctx context.Context, nam
 	matchingClusters := make([]clusterv1.Cluster, 0, len(clusterList.Items))
 
 	for i, cluster := range clusterList.Items {
-		if labelselector.Matches(labels.Set(cluster.Labels)) ||
-			cluster.Spec.Topology != nil && cluster.Spec.Topology.Class == clusterClassSelector {
+		// prefer clusterClassSelector if set
+		if clusterClassSelector != "" {
+			if cluster.Spec.Topology != nil && cluster.Spec.Topology.Class == clusterClassSelector {
+				matchingClusters = append(matchingClusters, clusterList.Items[i])
+			}
+		} else if labelselector.Matches(labels.Set(cluster.Labels)) {
 			matchingClusters = append(matchingClusters, clusterList.Items[i])
 		}
 	}
@@ -372,9 +376,15 @@ func (r *HelmChartProxyReconciler) ClusterToHelmChartProxiesMapper(o client.Obje
 			return nil
 		}
 
-		// either ClusterClass or label selector should match
-		if selector.Matches(labels.Set(cluster.Labels)) ||
-			cluster.Spec.Topology != nil && helmChartProxy.Spec.ClusterClassSelector == cluster.Spec.Topology.Class {
+		// prefer clusterClassSelector if set
+		if helmChartProxy.Spec.ClusterClassSelector != "" {
+			if cluster.Spec.Topology != nil && cluster.Spec.Topology.Class == helmChartProxy.Spec.ClusterClassSelector {
+				results = append(results, ctrl.Request{
+					// The HelmReleaseProxy is always in the same namespace as the HelmChartProxy.
+					NamespacedName: client.ObjectKey{Namespace: helmChartProxy.Namespace, Name: helmChartProxy.Name},
+				})
+			}
+		} else if selector.Matches(labels.Set(cluster.Labels)) {
 			results = append(results, ctrl.Request{
 				// The HelmReleaseProxy is always in the same namespace as the HelmChartProxy.
 				NamespacedName: client.ObjectKey{Namespace: helmChartProxy.Namespace, Name: helmChartProxy.Name},
