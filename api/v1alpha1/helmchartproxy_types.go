@@ -34,6 +34,9 @@ type HelmChartProxySpec struct {
 	// chart will be installed on all selected Clusters. If a Cluster is no longer selected, the Helm release will be uninstalled.
 	ClusterSelector metav1.LabelSelector `json:"clusterSelector"`
 
+	// ClusterClassSelector selects clusters based on their ClusterClass (cluster.spec.topology.class).
+	ClusterClassSelector string `json:"clusterClassSelector"`
+
 	// ChartName is the name of the Helm chart in the repository.
 	ChartName string `json:"chartName"`
 

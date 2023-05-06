@@ -134,12 +134,13 @@ func (r *HelmChartProxyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}()
 
 	selector := helmChartProxy.Spec.ClusterSelector
+	clusterClassSelector := helmChartProxy.Spec.ClusterClassSelector
 
 	log.V(2).Info("Finding matching clusters for HelmChartProxy with selector selector", "helmChartProxy", helmChartProxy.Name, "selector", selector)
 	// TODO: When a Cluster is being deleted, it will show up in the list of clusters even though we can't Reconcile on it.
 	// This is because of ownerRefs and how the Cluster gets deleted. It will be eventually consistent but it would be better
 	// to not have errors. An idea would be to check the deletion timestamp.
-	clusterList, err := r.listClustersWithLabels(ctx, helmChartProxy.Namespace, selector)
+	clusterList, err := r.listMatchingClusters(ctx, helmChartProxy.Namespace, selector, clusterClassSelector)
 	if err != nil {
 		conditions.MarkFalse(helmChartProxy, addonsv1alpha1.HelmReleaseProxySpecsUpToDateCondition, addonsv1alpha1.ClusterSelectionFailedReason, clusterv1.ConditionSeverityError, err.Error())
 
@@ -254,8 +255,8 @@ func (r *HelmChartProxyReconciler) reconcileDelete(ctx context.Context, helmChar
 	return nil
 }
 
-// listClustersWithLabels returns a list of Clusters that match the given label selector.
-func (r *HelmChartProxyReconciler) listClustersWithLabels(ctx context.Context, namespace string, selector metav1.LabelSelector) (*clusterv1.ClusterList, error) {
+// listMatchingClusters returns a list of Clusters that match the given label selector.
+func (r *HelmChartProxyReconciler) listMatchingClusters(ctx context.Context, namespace string, selector metav1.LabelSelector, clusterClassSelector string) (*clusterv1.ClusterList, error) {
 	clusterList := &clusterv1.ClusterList{}
 	// To support for the matchExpressions field, convert LabelSelector to labels.Selector to specify labels.Selector for ListOption. (Issue #15)
 	labelselector, err := metav1.LabelSelectorAsSelector(&selector)
@@ -263,11 +264,20 @@ func (r *HelmChartProxyReconciler) listClustersWithLabels(ctx context.Context, n
 		return nil, err
 	}
 
-	if err := r.Client.List(ctx, clusterList, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: labelselector}); err != nil {
+	if err := r.Client.List(ctx, clusterList, client.InNamespace(namespace)); err != nil {
 		return nil, err
 	}
 
-	return clusterList, nil
+	matchingClusters := make([]clusterv1.Cluster, 0, len(clusterList.Items))
+
+	for i, cluster := range clusterList.Items {
+		if labelselector.Matches(labels.Set(cluster.Labels)) ||
+			cluster.Spec.Topology != nil && cluster.Spec.Topology.Class == clusterClassSelector {
+			matchingClusters = append(matchingClusters, clusterList.Items[i])
+		}
+	}
+
+	return &clusterv1.ClusterList{Items: matchingClusters}, nil
 }
 
 // listInstalledReleases returns a list of HelmReleaseProxies that match the given label selector.
@@ -362,7 +372,9 @@ func (r *HelmChartProxyReconciler) ClusterToHelmChartProxiesMapper(o client.Obje
 			return nil
 		}
 
-		if selector.Matches(labels.Set(cluster.Labels)) {
+		// either ClusterClass or label selector should match
+		if selector.Matches(labels.Set(cluster.Labels)) ||
+			cluster.Spec.Topology != nil && helmChartProxy.Spec.ClusterClassSelector == cluster.Spec.Topology.Class {
 			results = append(results, ctrl.Request{
 				// The HelmReleaseProxy is always in the same namespace as the HelmChartProxy.
 				NamespacedName: client.ObjectKey{Namespace: helmChartProxy.Namespace, Name: helmChartProxy.Name},

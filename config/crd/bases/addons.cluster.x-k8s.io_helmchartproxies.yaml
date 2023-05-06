@@ -51,6 +51,10 @@ spec:
               chartName:
                 description: ChartName is the name of the Helm chart in the repository.
                 type: string
+              clusterClassSelector:
+                description: ClusterClassSelector selects clusters based on their
+                  ClusterClass (cluster.spec.topology.class).
+                type: string
               clusterSelector:
                 description: ClusterSelector selects Clusters in the same namespace
                   with a label that matches the specified label selector. The Helm
@@ -124,6 +128,7 @@ spec:
                 type: string
             required:
             - chartName
+            - clusterClassSelector
             - clusterSelector
             - repoURL
             type: object
